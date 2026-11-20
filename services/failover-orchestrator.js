@@ -166,6 +166,25 @@ class FailoverOrchestrator extends EventEmitter {
       await this.telegramBot.sendMessage(msg);
     });
 
+    this.telegramBot.on('command_battery', async () => {
+      const s = this.upsMonitor.getFullState();
+      const t = s.telemetry;
+      const pct = t?.batteryCharge || 0;
+      const bars = Math.round(pct / 10);
+      const visualBar = '█'.repeat(bars) + '░'.repeat(10 - bars);
+
+      const msg =
+`🔋 *Estado de la Batería del UPS*
+
+[${visualBar}] *${pct}%*
+• Tensión actual: *${t?.batteryVoltage?.toFixed(1) || '--'} V*
+• Autonomía estimada: *${s.runtimeMinutes || '--'} minutos*
+• Tasa de descarga: *${s.dischargeRatePctPerMin} %/min*
+• Carga de consumo: *${t?.loadPercent || 0}%* (~${t?.loadWatts || 0} W)
+• Estado de red: *${s.status === 'ON_BATTERY' ? '🚨 En Batería (Corte de Luz)' : '🟢 Red Eléctrica Estable'}*`;
+      await this.telegramBot.sendMessage(msg);
+    });
+
     this.telegramBot.on('command_backup', async () => {
       try {
         const res = await this.runBackup('telegram_manual');

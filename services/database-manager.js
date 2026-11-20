@@ -2,7 +2,7 @@
  * services/database-manager.js
  * 
  * Gestor de bases de datos para respaldos, restauración y prevención de Split-Brain.
- * Soporta PostgreSQL, MySQL y MariaDB a través de VPN.
+ * Soporta MySQL, MariaDB (mediante driver nativo mysql2 y CLI) y PostgreSQL.
  */
 
 'use strict';
@@ -10,13 +10,18 @@
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
-const { exec, spawn } = require('child_process');
+const { exec } = require('child_process');
+
+let mysql;
+try {
+  mysql = require('mysql2/promise');
+} catch (_) {}
 
 class DatabaseManager {
   constructor(config = {}) {
-    this.type = (config.type || 'postgres').toLowerCase();
+    this.type = (config.type || 'mysql').toLowerCase();
     this.name = config.name || 'sistema';
-    this.user = config.user || 'postgres';
+    this.user = config.user || 'root';
     this.password = config.password || '';
     this.backupsDir = config.backupsDir || path.join(__dirname, '..', 'backups');
 
@@ -24,7 +29,7 @@ class DatabaseManager {
       fs.mkdirSync(this.backupsDir, { recursive: true });
     }
 
-    // Ubicaciones de binarios
+    // Ubicaciones de binarios PostgreSQL en Windows
     this.pgDumpBin = this._findBinary([
       'C:\\Program Files\\PostgreSQL\\18\\bin\\pg_dump.exe',
       'C:\\Program Files\\PostgreSQL\\17\\bin\\pg_dump.exe',
@@ -39,6 +44,7 @@ class DatabaseManager {
       'psql',
     ]);
 
+    // Ubicaciones de binarios MySQL
     this.mysqlDumpBin = this._findBinary([
       'C:\\Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysqldump.exe',
       'mysqldump',
@@ -54,11 +60,11 @@ class DatabaseManager {
     for (const bin of candidates) {
       if (fs.existsSync(bin)) return bin;
     }
-    return candidates[candidates.length - 1]; // fallback al comando en PATH
+    return candidates[candidates.length - 1];
   }
 
   /**
-   * Verifica conectividad TCP con el nodo a través de la VPN.
+   * Verifica conectividad TCP con el nodo a través de la red / VPN.
    */
   testConnection(host, port, timeoutMs = 3000) {
     return new Promise((resolve) => {
@@ -95,46 +101,165 @@ class DatabaseManager {
     const filename = `backup_${this.name}_${tag}_${timestamp}.sql`;
     const outputPath = path.join(this.backupsDir, filename);
 
-    return new Promise((resolve, reject) => {
-      let cmd = '';
-      const env = { ...process.env };
+    if (this.type === 'mysql' || this.type === 'mariadb') {
+      return this._createBackupMySQL(host, port, outputPath, filename);
+    } else {
+      return this._createBackupPostgres(host, port, outputPath, filename);
+    }
+  }
 
-      if (this.type === 'postgres') {
-        env.PGPASSWORD = this.password;
-        cmd = `"${this.pgDumpBin}" -h ${host} -p ${port} -U ${this.user} -d ${this.name} -F p -f "${outputPath}"`;
-      } else {
-        const passArg = this.password ? `-p"${this.password}"` : '';
-        cmd = `"${this.mysqlDumpBin}" -h ${host} -P ${port} -u ${this.user} ${passArg} ${this.name} > "${outputPath}"`;
-      }
+  /**
+   * Respaldo para MySQL: Si no existe mysqldump.exe en el host Windows,
+   * utiliza el driver nativo mysql2 para extraer esquema y datos tabla por tabla.
+   */
+  async _createBackupMySQL(host, port, outputPath, filename) {
+    const start = Date.now();
 
-      const start = Date.now();
-      exec(cmd, { env, windowsHide: true }, (err, stdout, stderr) => {
-        if (err) {
-          // Si falló la herramienta nativa, crear un archivo de registro con el detalle del error
-          return reject(new Error(`Fallo al respaldar base de datos: ${stderr || err.message}`));
+    // Intentar primero con mysql2 nativo si está disponible
+    if (mysql) {
+      try {
+        const conn = await mysql.createConnection({
+          host,
+          port,
+          user: this.user,
+          password: this.password,
+          database: this.name,
+          connectTimeout: 8000,
+        });
+
+        let sqlDump = `-- ========================================================\n`;
+        sqlDump += `-- Respaldo Automático UPS Disaster Recovery\n`;
+        sqlDump += `-- Base de Datos: ${this.name}\n`;
+        sqlDump += `-- Servidor     : ${host}:${port}\n`;
+        sqlDump += `-- Fecha        : ${new Date().toISOString()}\n`;
+        sqlDump += `-- ========================================================\n\n`;
+        sqlDump += `SET FOREIGN_KEY_CHECKS=0;\n\n`;
+
+        const [tables] = await conn.query('SHOW TABLES');
+        const tableKey = `Tables_in_${this.name}`;
+
+        for (const row of tables) {
+          const tableName = row[tableKey] || Object.values(row)[0];
+          if (!tableName) continue;
+
+          // Extraer DDL (Estructura)
+          const [createRows] = await conn.query(`SHOW CREATE TABLE \`${tableName}\``);
+          if (createRows.length > 0) {
+            const createSql = createRows[0]['Create Table'];
+            sqlDump += `DROP TABLE IF EXISTS \`${tableName}\`;\n`;
+            sqlDump += `${createSql};\n\n`;
+          }
+
+          // Extraer Datos
+          const [dataRows] = await conn.query(`SELECT * FROM \`${tableName}\``);
+          if (dataRows.length > 0) {
+            for (const dataRow of dataRows) {
+              const keys = Object.keys(dataRow).map((k) => `\`${k}\``).join(', ');
+              const values = Object.values(dataRow)
+                .map((v) => (v === null ? 'NULL' : conn.escape(v)))
+                .join(', ');
+              sqlDump += `INSERT INTO \`${tableName}\` (${keys}) VALUES (${values});\n`;
+            }
+            sqlDump += '\n';
+          }
         }
 
-        const stats = fs.existsSync(outputPath) ? fs.statSync(outputPath) : { size: 0 };
-        const durationSec = ((Date.now() - start) / 1000).toFixed(1);
+        sqlDump += `SET FOREIGN_KEY_CHECKS=1;\n`;
+        fs.writeFileSync(outputPath, sqlDump, 'utf8');
+        await conn.end();
 
+        const stats = fs.statSync(outputPath);
+        return {
+          filename,
+          filepath: outputPath,
+          sizeBytes: stats.size,
+          sizeFormatted: (stats.size / 1024 / 1024).toFixed(2) + ' MB',
+          durationSec: ((Date.now() - start) / 1000).toFixed(1),
+          timestamp: new Date().toISOString(),
+          method: 'mysql2_native',
+        };
+      } catch (err) {
+        // Si falló por credenciales u otro motivo, documentar y reintentar con CLI si está disponible
+        if (!fs.existsSync(this.mysqlDumpBin) && this.mysqlDumpBin === 'mysqldump') {
+          throw new Error(`Error en respaldo MySQL (${host}:${port}): ${err.message}`);
+        }
+      }
+    }
+
+    // Fallback con mysqldump.exe si está instalado
+    return new Promise((resolve, reject) => {
+      const passArg = this.password ? `-p"${this.password}"` : '';
+      const cmd = `"${this.mysqlDumpBin}" -h ${host} -P ${port} -u ${this.user} ${passArg} ${this.name} > "${outputPath}"`;
+
+      exec(cmd, { windowsHide: true }, (err, stdout, stderr) => {
+        if (err) {
+          return reject(new Error(`Fallo mysqldump: ${stderr || err.message}`));
+        }
+        const stats = fs.existsSync(outputPath) ? fs.statSync(outputPath) : { size: 0 };
         resolve({
           filename,
           filepath: outputPath,
           sizeBytes: stats.size,
           sizeFormatted: (stats.size / 1024 / 1024).toFixed(2) + ' MB',
-          durationSec,
+          durationSec: ((Date.now() - start) / 1000).toFixed(1),
           timestamp: new Date().toISOString(),
+          method: 'mysqldump_cli',
         });
       });
     });
   }
 
   /**
-   * Restaura un respaldo en el servidor destino (Secundario o Primario).
+   * Respaldo para PostgreSQL con pg_dump
+   */
+  _createBackupPostgres(host, port, outputPath, filename) {
+    const start = Date.now();
+    return new Promise((resolve, reject) => {
+      const env = { ...process.env, PGPASSWORD: this.password };
+      const cmd = `"${this.pgDumpBin}" -h ${host} -p ${port} -U ${this.user} -d ${this.name} -F p -f "${outputPath}"`;
+
+      exec(cmd, { env, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) {
+          return reject(new Error(`Fallo pg_dump: ${stderr || err.message}`));
+        }
+        const stats = fs.existsSync(outputPath) ? fs.statSync(outputPath) : { size: 0 };
+        resolve({
+          filename,
+          filepath: outputPath,
+          sizeBytes: stats.size,
+          sizeFormatted: (stats.size / 1024 / 1024).toFixed(2) + ' MB',
+          durationSec: ((Date.now() - start) / 1000).toFixed(1),
+          timestamp: new Date().toISOString(),
+          method: 'pg_dump',
+        });
+      });
+    });
+  }
+
+  /**
+   * Restaura un respaldo en el servidor destino.
    */
   async restoreBackup(targetHost, targetPort, backupFilePath) {
     if (!fs.existsSync(backupFilePath)) {
       throw new Error(`Archivo de respaldo no encontrado: ${backupFilePath}`);
+    }
+
+    if (this.type === 'mysql' || this.type === 'mariadb') {
+      if (mysql) {
+        const sql = fs.readFileSync(backupFilePath, 'utf8');
+        const conn = await mysql.createConnection({
+          host: targetHost,
+          port: targetPort,
+          user: this.user,
+          password: this.password,
+          database: this.name,
+          multipleStatements: true,
+          connectTimeout: 8000,
+        });
+        await conn.query(sql);
+        await conn.end();
+        return { success: true, timestamp: new Date().toISOString() };
+      }
     }
 
     return new Promise((resolve, reject) => {
@@ -150,18 +275,37 @@ class DatabaseManager {
       }
 
       exec(cmd, { env, windowsHide: true }, (err, stdout, stderr) => {
-        if (err) {
-          return reject(new Error(`Fallo al restaurar en nodo destino: ${stderr || err.message}`));
-        }
+        if (err) return reject(new Error(`Fallo al restaurar: ${stderr || err.message}`));
         resolve({ success: true, timestamp: new Date().toISOString() });
       });
     });
   }
 
   /**
-   * Bloqueo contra Split-Brain: Configura la base de datos como Solo Lectura (Read-Only) o Lectura/Escritura.
+   * Bloqueo contra Split-Brain: Configura la base de datos en solo lectura (Read-Only) o R/W.
    */
   async setReadOnly(host, port, enableReadOnly = true) {
+    if (this.type === 'mysql' || this.type === 'mariadb') {
+      if (mysql) {
+        try {
+          const conn = await mysql.createConnection({
+            host,
+            port,
+            user: this.user,
+            password: this.password,
+            connectTimeout: 5000,
+          });
+          const mode = enableReadOnly ? 'ON' : 'OFF';
+          await conn.query(`SET GLOBAL read_only = ${mode};`);
+          await conn.end();
+          return { readOnly: enableReadOnly, host, port };
+        } catch (err) {
+          // Si no tiene permisos globales o falla
+          console.warn(`[DB] Aviso al cambiar read_only en ${host}:${port}:`, err.message);
+        }
+      }
+    }
+
     return new Promise((resolve, reject) => {
       let sql = '';
       let cmd = '';
@@ -180,17 +324,12 @@ class DatabaseManager {
       }
 
       exec(cmd, { env, windowsHide: true }, (err, stdout, stderr) => {
-        if (err) {
-          return reject(new Error(`Error al cambiar modo de solo lectura: ${stderr || err.message}`));
-        }
+        if (err) return reject(new Error(`Error al cambiar modo de solo lectura: ${stderr || err.message}`));
         resolve({ readOnly: enableReadOnly, host, port });
       });
     });
   }
 
-  /**
-   * Lista los respaldos disponibles en la carpeta de respaldos.
-   */
   listBackups() {
     try {
       const files = fs.readdirSync(this.backupsDir);
