@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monitor UPS CDP & Alta Disponibilidad (Disaster Recovery)</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #141b2d;
+      --card-border: #1f293d;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --green: #10b981;
+      --green-glow: rgba(16, 185, 129, 0.25);
+      --red: #ef4444;
+      --red-glow: rgba(239, 68, 68, 0.35);
+      --amber: #f59e0b;
+      --blue: #3b82f6;
+      --cyan: #06b6d4;
+      --purple: #8b5cf6;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; }
+    body { background-color: var(--bg); color: var(--text-main); min-height: 100vh; padding: 20px; }
+    .container { max-width: 1280px; margin: 0 auto; }
+
+    /* Header */
+    header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 20px; border-bottom: 1px solid var(--card-border); margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+    .logo-area { display: flex; align-items: center; gap: 14px; }
+    .logo-icon { width: 44px; height: 44px; background: linear-gradient(135deg, #2563eb, #06b6d4); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+    h1 { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.5px; }
+    .subtitle { color: var(--text-muted); font-size: 0.85rem; }
+
+    .header-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .badge-conn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 9999px; font-size: 0.82rem; font-weight: 600; background: rgba(16, 185, 129, 0.15); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-conn.disconnected { background: rgba(239, 68, 68, 0.15); color: var(--red); border-color: rgba(239, 68, 68, 0.3); }
+    .badge-conn.locked { background: rgba(245, 158, 11, 0.15); color: var(--amber); border-color: rgba(245, 158, 11, 0.3); }
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background-color: currentColor; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } 100% { opacity: 1; transform: scale(1); } }
+
+    .btn-action { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text-main); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; transition: all 0.2s; }
+    .btn-action:hover { border-color: var(--blue); background: rgba(59, 130, 246, 0.1); }
+    .btn-primary { background: #2563eb; border-color: #3b82f6; font-weight: 600; }
+    .btn-primary:hover { background: #1d4ed8; }
+
+    /* Alert Banner */
+    .banner { border-radius: 14px; padding: 18px 24px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; transition: all 0.3s ease; }
+    .banner.normal { background: linear-gradient(90deg, rgba(16, 185, 129, 0.12), rgba(16, 185, 129, 0.04)); border: 1px solid rgba(16, 185, 129, 0.3); box-shadow: 0 0 20px var(--green-glow); }
+    .banner.outage { background: linear-gradient(90deg, rgba(239, 68, 68, 0.25), rgba(239, 68, 68, 0.1)); border: 1px solid rgba(239, 68, 68, 0.6); box-shadow: 0 0 30px var(--red-glow); animation: alertPulse 1.8s infinite alternate; }
+    .banner.warning { background: linear-gradient(90deg, rgba(245, 158, 11, 0.2), rgba(245, 158, 11, 0.05)); border: 1px solid rgba(245, 158, 11, 0.5); }
+    @keyframes alertPulse { from { border-color: rgba(239, 68, 68, 0.5); } to { border-color: rgba(239, 68, 68, 1); } }
+
+    .banner-content { display: flex; align-items: center; gap: 16px; }
+    .banner-icon { font-size: 32px; }
+    .banner-title { font-size: 1.15rem; font-weight: 700; }
+    .banner-desc { font-size: 0.9rem; color: var(--text-muted); margin-top: 4px; }
+    .timer-box { text-align: right; min-width: 160px; }
+    .timer-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+    .timer-val { font-size: 1.6rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+    /* Grid Layout */
+    .grid-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; margin-bottom: 24px; }
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 20px; position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; }
+    .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .card-label { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .card-icon { font-size: 20px; opacity: 0.8; }
+    .card-value { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+    .card-unit { font-size: 1.1rem; font-weight: 500; color: var(--text-muted); margin-left: 4px; }
+    .card-meta { font-size: 0.82rem; color: var(--text-muted); display: flex; justify-content: space-between; align-items: center; }
+
+    .prog-track { width: 100%; height: 8px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden; margin-top: 10px; margin-bottom: 8px; }
+    .prog-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease, background-color 0.4s ease; }
+
+    /* HA Section */
+    .section-ha { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px; margin-bottom: 24px; }
+    .section-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+    .nodes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+    .node-card { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--card-border); border-radius: 12px; padding: 18px; position: relative; }
+    .node-card.active-node { border-color: var(--green); box-shadow: 0 0 15px rgba(16, 185, 129, 0.15); }
+    .node-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .node-title { font-size: 1.05rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .node-ip { font-family: monospace; font-size: 0.95rem; color: var(--cyan); margin-bottom: 8px; }
+    .node-row { display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px; }
+
+    /* Chart Section */
+    .section-charts { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px; margin-bottom: 24px; }
+    .chart-container { position: relative; width: 100%; height: 240px; }
+    canvas { width: 100% !important; height: 100% !important; }
+
+    /* Events & Backups Tables */
+    .section-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px; }
+    .box-table { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 20px; }
+    .custom-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin-top: 10px; }
+    .custom-table th { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--card-border); color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
+    .custom-table td { padding: 10px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); vertical-align: middle; }
+
+    .tag { font-size: 0.78rem; padding: 3px 8px; border-radius: 6px; font-weight: 600; display: inline-block; }
+    .tag-ok { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+    .tag-warn { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+    .tag-danger { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+    .tag-blue { background: rgba(59, 130, 246, 0.15); color: var(--blue); }
+    .tag-purple { background: rgba(139, 92, 246, 0.15); color: var(--purple); }
+
+    .event-badge { display: inline-block; padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; }
+    .event-badge.OUTAGE_START { background: rgba(239, 68, 68, 0.2); color: var(--red); }
+    .event-badge.OUTAGE_END { background: rgba(16, 185, 129, 0.2); color: var(--green); }
+    .event-badge.BATTERY_LOW { background: rgba(245, 158, 11, 0.2); color: var(--amber); }
+
+    @media (max-width: 768px) {
+      .banner { flex-direction: column; text-align: center; }
+      .banner-content { flex-direction: column; }
+      .timer-box { text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="logo-area">
+        <div class="logo-icon">⚡</div>
+        <div>
+          <h1 id="device-title">Monitor UPS CDP & Alta Disponibilidad</h1>
+          <div class="subtitle" id="device-meta">Disaster Recovery • Replicación VPN • Bot de Telegram</div>
+        </div>
+      </div>
+      <div class="header-controls">
+        <div class="badge-conn" id="conn-badge">
+          <span class="pulse-dot"></span>
+          <span id="conn-text">Conectando...</span>
+        </div>
+        <div class="tag tag-purple" id="tg-badge">
+          🤖 Bot Telegram: <b id="tg-status">Configurar</b>
+        </div>
+        <button class="btn-action" id="btn-sound">
+          <span id="sound-icon">🔊</span> Alarma: <b id="sound-state">Activada</b>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Alert Banner -->
+    <div class="banner normal" id="main-banner">
+      <div class="banner-content">
+        <div class="banner-icon" id="banner-icon">🟢</div>
+        <div>
+          <div class="banner-title" id="banner-title">Red Eléctrica Estable (Normal)</div>
+          <div class="banner-desc" id="banner-desc">HomeLab operando con energía normal. Batería en régimen de flotación.</div>
+        </div>
+      </div>
+      <div class="timer-box" id="timer-box" style="display: none;">
+        <div class="timer-label">Tiempo sin energía</div>
+        <div class="timer-val" id="timer-val">00:00</div>
+      </div>
+    </div>
+
+    <!-- SECCIÓN ALTA DISPONIBILIDAD & VPN DISASTER RECOVERY -->
+    <div class="section-ha">
+      <div class="section-title">
+        <span>🌐 Alta Disponibilidad & Conmutación VPN (Split-Brain Protection)</span>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn-action btn-primary" id="btn-backup-now">💾 Respaldar Ahora</button>
+          <button class="btn-action" id="btn-switch-node">🔄 Conmutar Nodo Activo</button>
+        </div>
+      </div>
+      <div class="nodes-grid">
+        <!-- Nodo A: HomeLab -->
+        <div class="node-card active-node" id="card-primary">
+          <div class="node-header">
+            <span class="node-title">🏠 HomeLab (Debian A)</span>
+            <span class="tag tag-ok" id="badge-primary-role">PRIMARIO (ACTIVO)</span>
+          </div>
+          <div class="node-ip" id="ip-primary">192.168.1.50:5432</div>
+          <div class="node-row">
+            <span>Conectividad VPN:</span>
+            <b id="status-primary-ping" class="tag tag-ok">Ping: -- ms</b>
+          </div>
+          <div class="node-row">
+            <span>Modo de Escritura:</span>
+            <b id="status-primary-mode" style="color: var(--green);">Lectura / Escritura (R/W)</b>
+          </div>
+        </div>
+
+        <!-- Nodo B: Remoto VPN -->
+        <div class="node-card" id="card-standby">
+          <div class="node-header">
+            <span class="node-title">☁️ Servidor Remoto (Debian B)</span>
+            <span class="tag tag-blue" id="badge-standby-role">STANDBY</span>
+          </div>
+          <div class="node-ip" id="ip-standby">10.8.0.2:5432</div>
+          <div class="node-row">
+            <span>Conectividad VPN:</span>
+            <b id="status-standby-ping" class="tag tag-ok">Ping: -- ms</b>
+          </div>
+          <div class="node-row">
+            <span>Modo de Escritura:</span>
+            <b id="status-standby-mode" style="color: var(--amber);">Solo Lectura (Protegido)</b>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Metrics Grid -->
+    <div class="grid-metrics">
+      <div class="card">
+        <div class="card-top">
+          <span class="card-label">Batería UPS</span>
+          <span class="card-icon">🔋</span>
+        </div>
+        <div class="card-value" id="bat-pct">--<span class="card-unit">%</span></div>
+        <div class="prog-track">
+          <div class="prog-fill" id="bat-prog" style="width: 0%; background: var(--green);"></div>
+        </div>
+        <div class="card-meta">
+          <span>Tensión: <b id="bat-volt">-- V</b></span>
+          <span id="bat-trend" class="tag tag-ok">Flotación / Llena</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-label">Autonomía Estimada</span>
+          <span class="card-icon">⏱️</span>
+        </div>
+        <div class="card-value" id="runtime-val">--<span class="card-unit">min</span></div>
+        <div class="card-meta" style="margin-top: 18px;">
+          <span>Descarga: <b id="discharge-rate">0.0 %/min</b></span>
+          <span class="tag tag-ok" id="runtime-tag">Respaldo OK</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-label">Tensión Entrada (Red)</span>
+          <span class="card-icon">🔌</span>
+        </div>
+        <div class="card-value" id="in-volt">--<span class="card-unit">V</span></div>
+        <div class="card-meta" style="margin-top: 18px;">
+          <span>Frecuencia: <b id="in-freq">-- Hz</b></span>
+          <span id="in-status" class="tag tag-ok">Red Presente</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-label">Tensión Salida UPS</span>
+          <span class="card-icon">⚡</span>
+        </div>
+        <div class="card-value" id="out-volt">--<span class="card-unit">V</span></div>
+        <div class="card-meta" style="margin-top: 18px;">
+          <span>Modo: <b id="ups-mode">Línea (OL)</b></span>
+          <span class="tag tag-ok">Regulado</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-label">Carga de Consumo</span>
+          <span class="card-icon">📊</span>
+        </div>
+        <div class="card-value" id="load-pct">--<span class="card-unit">%</span></div>
+        <div class="prog-track">
+          <div class="prog-fill" id="load-prog" style="width: 0%; background: var(--blue);"></div>
+        </div>
+        <div class="card-meta">
+          <span>Potencia estimada: <b id="load-watts">-- W</b></span>
+          <span class="tag tag-ok" id="load-tag">Normal</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-top">
+          <span class="card-label">Temperatura UPS</span>
+          <span class="card-icon">🌡️</span>
+        </div>
+        <div class="card-value" id="temp-val">--<span class="card-unit">°C</span></div>
+        <div class="card-meta" style="margin-top: 18px;">
+          <span>Límite seguro: <b>50 °C</b></span>
+          <span class="tag tag-ok" id="temp-tag">Óptima</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Telemetry Canvas Chart -->
+    <div class="section-charts">
+      <div class="section-title">
+        <span>Historial de Voltajes y Batería en Vivo</span>
+        <span style="font-size: 0.8rem; color: var(--text-muted); font-weight: normal;">Actualización cada 2.5s</span>
+      </div>
+      <div class="chart-container">
+        <canvas id="live-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Tables Grid: Event Log & Backups -->
+    <div class="section-tables">
+      <!-- Events Table -->
+      <div class="box-table">
+        <div class="section-title">
+          <span>⚡ Historial de Cortes de Energía</span>
+          <span id="events-count" style="font-size: 0.8rem; color: var(--text-muted);">0 cortes</span>
+        </div>
+        <div style="overflow-x: auto;">
+          <table class="custom-table">
+            <thead>
+              <tr>
+                <th>Hora</th>
+                <th>Evento</th>
+                <th>Detalles</th>
+              </tr>
+            </thead>
+            <tbody id="events-tbody">
+              <tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 18px;">Esperando eventos...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Backups Table -->
+      <div class="box-table">
+        <div class="section-title">
+          <span>💾 Respaldos de Base de Datos</span>
+          <span id="backups-count" style="font-size: 0.8rem; color: var(--text-muted);">0 respaldos</span>
+        </div>
+        <div style="overflow-x: auto;">
+          <table class="custom-table">
+            <thead>
+              <tr>
+                <th>Fecha/Hora</th>
+                <th>Archivo</th>
+                <th>Tamaño</th>
+                <th>Descargar</th>
+              </tr>
+            </thead>
+            <tbody id="backups-tbody">
+              <tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 18px;">Cargando respaldos...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Sintetizador de audio para alarmas
+    let soundEnabled = true;
+    let audioCtx = null;
+    let alarmInterval = null;
+
+    function playBeep(freq = 880, duration = 0.25) {
+      if (!soundEnabled) return;
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+      } catch (_) {}
+    }
+
+    const btnSound = document.getElementById('btn-sound');
+    btnSound.addEventListener('click', () => {
+      soundEnabled = !soundEnabled;
+      document.getElementById('sound-state').textContent = soundEnabled ? 'Activada' : 'Silenciada';
+      document.getElementById('sound-icon').textContent = soundEnabled ? '🔊' : '🔇';
+      if (soundEnabled) playBeep(600, 0.1);
+    });
+
+    // Gráfico Canvas
+    const canvas = document.getElementById('live-chart');
+    const ctx = canvas.getContext('2d');
+    let chartHistory = [];
+
+    function resizeCanvas() {
+      canvas.width = canvas.parentElement.clientWidth * window.devicePixelRatio;
+      canvas.height = canvas.parentElement.clientHeight * window.devicePixelRatio;
+      ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function drawChart() {
+      const w = canvas.parentElement.clientWidth;
+      const h = canvas.parentElement.clientHeight;
+      ctx.clearRect(0, 0, w, h);
+
+      if (!chartHistory || chartHistory.length < 2) {
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Recopilando datos de telemetría...', w / 2, h / 2);
+        return;
+      }
+
+      const padding = { top: 20, right: 30, bottom: 25, left: 45 };
+      const cw = w - padding.left - padding.right;
+      const ch = h - padding.top - padding.bottom;
+
+      ctx.strokeStyle = '#1f293d';
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = padding.top + (ch / 4) * i;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(w - padding.right, y);
+        ctx.stroke();
+
+        const v = Math.round(260 - (260 / 4) * i);
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(v + 'V', padding.left - 8, y + 3);
+      }
+
+      const n = chartHistory.length;
+      const getX = (i) => padding.left + (cw / (n - 1)) * i;
+      const getYVolt = (v) => padding.top + ch - (Math.max(0, Math.min(v || 0, 260)) / 260) * ch;
+      const getYPct = (p) => padding.top + ch - (Math.max(0, Math.min(p || 0, 100)) / 100) * ch;
+
+      // 1. Entrada (Azul)
+      ctx.beginPath();
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 2;
+      chartHistory.forEach((pt, i) => {
+        const x = getX(i);
+        const y = getYVolt(pt.inputVoltage);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // 2. Salida (Verde)
+      ctx.beginPath();
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 2;
+      chartHistory.forEach((pt, i) => {
+        const x = getX(i);
+        const y = getYVolt(pt.outputVoltage);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // 3. Batería (Amarillo)
+      ctx.beginPath();
+      ctx.strokeStyle = '#f59e0b';
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 2;
+      chartHistory.forEach((pt, i) => {
+        const x = getX(i);
+        const y = getYPct(pt.batteryCharge);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Leyenda
+      const legends = [
+        { label: 'Entrada (V)', color: '#3b82f6' },
+        { label: 'Salida (V)', color: '#10b981' },
+        { label: 'Batería (%)', color: '#f59e0b' },
+      ];
+      ctx.font = '11px sans-serif';
+      let lx = padding.left + 10;
+      legends.forEach((item) => {
+        ctx.fillStyle = item.color;
+        ctx.fillRect(lx, 8, 10, 4);
+        ctx.fillStyle = '#9ca3af';
+        ctx.textAlign = 'left';
+        ctx.fillText(item.label, lx + 16, 12);
+        lx += 95;
+      });
+    }
+
+    // Actualización de UI
+    function updateUI(state) {
+      const connBadge = document.getElementById('conn-badge');
+      const connText = document.getElementById('conn-text');
+      const banner = document.getElementById('main-banner');
+      const bannerTitle = document.getElementById('banner-title');
+      const bannerDesc = document.getElementById('banner-desc');
+      const bannerIcon = document.getElementById('banner-icon');
+      const timerBox = document.getElementById('timer-box');
+      const timerVal = document.getElementById('timer-val');
+
+      // Estado de conexión
+      if (state.status === 'SYNCHRONIZING') {
+        connBadge.className = 'badge-conn locked';
+        connText.textContent = 'Sincronizando...';
+      } else if (!state.connected) {
+        connBadge.className = 'badge-conn disconnected';
+        connText.textContent = 'UPS Desconectado';
+        banner.className = 'banner warning';
+        bannerIcon.textContent = '🔌';
+        bannerTitle.textContent = 'UPS Desconectado';
+        bannerDesc.textContent = state.message;
+        timerBox.style.display = 'none';
+        return;
+      }
+
+      const t = state.telemetry;
+      if (!t) return;
+
+      const isOnBattery = t.status && t.status.onBattery;
+      connBadge.className = 'badge-conn';
+      connText.textContent = isOnBattery ? 'En Batería' : 'En Línea';
+
+      if (isOnBattery) {
+        banner.className = 'banner outage';
+        bannerIcon.textContent = '🚨';
+        bannerTitle.textContent = '¡CORTE DE ENERGÍA DETECTADO!';
+        bannerDesc.textContent = 'La red eléctrica se ha interrumpido. El UPS está respaldando los servidores.';
+        timerBox.style.display = 'block';
+
+        if (state.activeOutage) {
+          const s = state.activeOutage.elapsedSeconds || 0;
+          const mins = String(Math.floor(s / 60)).padStart(2, '0');
+          const secs = String(s % 60).padStart(2, '0');
+          timerVal.textContent = `${mins}:${secs}`;
+        }
+
+        if (!alarmInterval) {
+          playBeep(880, 0.4);
+          alarmInterval = setInterval(() => playBeep(880, 0.3), 4000);
+        }
+      } else {
+        banner.className = 'banner normal';
+        bannerIcon.textContent = '🟢';
+        bannerTitle.textContent = 'Red Eléctrica Estable (Normal)';
+        bannerDesc.textContent = 'El suministro eléctrico es normal. HomeLab operando sin interrupción.';
+        timerBox.style.display = 'none';
+
+        if (alarmInterval) {
+          clearInterval(alarmInterval);
+          alarmInterval = null;
+        }
+      }
+
+      // Tarjetas Métricas
+      const batPct = t.batteryCharge != null ? t.batteryCharge : '--';
+      document.getElementById('bat-pct').innerHTML = `${batPct}<span class="card-unit">%</span>`;
+      document.getElementById('bat-prog').style.width = `${t.batteryCharge || 0}%`;
+      document.getElementById('bat-volt').textContent = t.batteryVoltage ? `${t.batteryVoltage.toFixed(1)} V` : '-- V';
+
+      const batProg = document.getElementById('bat-prog');
+      const batTrend = document.getElementById('bat-trend');
+      if (t.batteryCharge < 20) {
+        batProg.style.backgroundColor = 'var(--red)';
+        batTrend.className = 'tag tag-danger';
+        batTrend.textContent = 'Crítico';
+      } else if (t.batteryCharge < 50) {
+        batProg.style.backgroundColor = 'var(--amber)';
+        batTrend.className = 'tag tag-warn';
+        batTrend.textContent = isOnBattery ? 'Descargando' : 'Cargando';
+      } else {
+        batProg.style.backgroundColor = 'var(--green)';
+        batTrend.className = 'tag tag-ok';
+        batTrend.textContent = isOnBattery ? 'Descargando' : 'Flotación / Llena';
+      }
+
+      document.getElementById('runtime-val').innerHTML = `${state.runtimeMinutes || '--'}<span class="card-unit">min</span>`;
+      document.getElementById('discharge-rate').textContent = `${state.dischargeRatePctPerMin || 0} %/min`;
+
+      document.getElementById('in-volt').innerHTML = `${t.inputVoltage != null ? t.inputVoltage.toFixed(1) : '--'}<span class="card-unit">V</span>`;
+      document.getElementById('in-freq').textContent = t.inputFrequency ? `${t.inputFrequency.toFixed(1)} Hz` : '-- Hz';
+      document.getElementById('out-volt').innerHTML = `${t.outputVoltage != null ? t.outputVoltage.toFixed(1) : '--'}<span class="card-unit">V</span>`;
+      document.getElementById('ups-mode').textContent = t.statusText || (isOnBattery ? 'Batería (OB)' : 'Línea (OL)');
+
+      const inStatus = document.getElementById('in-status');
+      if (isOnBattery || (t.inputVoltage != null && t.inputVoltage < 50)) {
+        inStatus.className = 'tag tag-danger';
+        inStatus.textContent = 'CORTE TOTAL';
+      } else {
+        inStatus.className = 'tag tag-ok';
+        inStatus.textContent = 'Estable';
+      }
+
+      document.getElementById('load-pct').innerHTML = `${t.loadPercent != null ? t.loadPercent : '--'}<span class="card-unit">%</span>`;
+      document.getElementById('load-prog').style.width = `${t.loadPercent || 0}%`;
+      document.getElementById('load-watts').textContent = `${t.loadWatts || 0} W`;
+      document.getElementById('temp-val').innerHTML = `${t.temperature != null ? t.temperature.toFixed(1) : '--'}<span class="card-unit">°C</span>`;
+
+      // ALTA DISPONIBILIDAD (HA)
+      if (state.ha) {
+        const ha = state.ha;
+        const isPrimaryActive = ha.activeNode === 'PRIMARY';
+
+        const cardPrimary = document.getElementById('card-primary');
+        const cardStandby = document.getElementById('card-standby');
+        const badgePrimary = document.getElementById('badge-primary-role');
+        const badgeStandby = document.getElementById('badge-standby-role');
+
+        if (isPrimaryActive) {
+          cardPrimary.className = 'node-card active-node';
+          cardStandby.className = 'node-card';
+          badgePrimary.className = 'tag tag-ok';
+          badgePrimary.textContent = 'PRIMARIO (ACTIVO R/W)';
+          badgeStandby.className = 'tag tag-blue';
+          badgeStandby.textContent = 'STANDBY (SOLO LECTURA)';
+          document.getElementById('status-primary-mode').textContent = 'Lectura / Escritura (R/W)';
+          document.getElementById('status-primary-mode').style.color = 'var(--green)';
+          document.getElementById('status-standby-mode').textContent = 'Solo Lectura (Protegido)';
+          document.getElementById('status-standby-mode').style.color = 'var(--amber)';
+        } else {
+          cardPrimary.className = 'node-card';
+          cardStandby.className = 'node-card active-node';
+          badgePrimary.className = 'tag tag-blue';
+          badgePrimary.textContent = 'STANDBY (SOLO LECTURA)';
+          badgeStandby.className = 'tag tag-ok';
+          badgeStandby.textContent = 'REMOTO (ACTIVO R/W)';
+          document.getElementById('status-primary-mode').textContent = 'Solo Lectura (Protegido)';
+          document.getElementById('status-primary-mode').style.color = 'var(--amber)';
+          document.getElementById('status-standby-mode').textContent = 'Lectura / Escritura (R/W)';
+          document.getElementById('status-standby-mode').style.color = 'var(--green)';
+        }
+
+        document.getElementById('ip-primary').textContent = `${ha.primaryConfig.host}:${ha.primaryConfig.port}`;
+        document.getElementById('ip-standby').textContent = `${ha.standbyConfig.host}:${ha.standbyConfig.port}`;
+
+        const pPing = document.getElementById('status-primary-ping');
+        if (ha.health.primary.reachable) {
+          pPing.className = 'tag tag-ok';
+          pPing.textContent = `Online (${ha.health.primary.latencyMs}ms)`;
+        } else {
+          pPing.className = 'tag tag-danger';
+          pPing.textContent = 'Inaccesible';
+        }
+
+        const sPing = document.getElementById('status-standby-ping');
+        if (ha.health.standby.reachable) {
+          sPing.className = 'tag tag-ok';
+          sPing.textContent = `Online (${ha.health.standby.latencyMs}ms)`;
+        } else {
+          sPing.className = 'tag tag-danger';
+          sPing.textContent = 'Inaccesible';
+        }
+      }
+
+      // Telegram status
+      const tgStatus = document.getElementById('tg-status');
+      if (state.telegramEnabled) {
+        tgStatus.textContent = 'Conectado';
+        document.getElementById('tg-badge').className = 'tag tag-ok';
+      } else {
+        tgStatus.textContent = 'Configurar (.env)';
+        document.getElementById('tg-badge').className = 'tag tag-purple';
+      }
+
+      // Eventos
+      if (state.recentEvents) {
+        renderEvents(state.recentEvents);
+      }
+    }
+
+    function renderEvents(events) {
+      const tbody = document.getElementById('events-tbody');
+      document.getElementById('events-count').textContent = `${events.length} cortes/eventos`;
+      if (!events.length) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 18px;">Sin cortes recientes</td></tr>';
+        return;
+      }
+      tbody.innerHTML = events.slice(0, 8).map(e => {
+        const time = new Date(e.timestamp).toLocaleTimeString();
+        return `
+          <tr>
+            <td style="color: var(--text-muted); font-size: 0.78rem;">${time}</td>
+            <td><span class="event-badge ${e.type}">${e.title}</span></td>
+            <td style="color: var(--text-muted); font-size: 0.82rem;">${e.description}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function loadBackups() {
+      try {
+        const res = await fetch('/api/backups');
+        if (res.ok) {
+          const backups = await res.json();
+          const tbody = document.getElementById('backups-tbody');
+          document.getElementById('backups-count').textContent = `${backups.length} respaldos`;
+          if (!backups.length) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 18px;">No hay respaldos aún. Haz clic en "Respaldar Ahora".</td></tr>';
+            return;
+          }
+          tbody.innerHTML = backups.slice(0, 8).map(b => {
+            const time = new Date(b.createdAt).toLocaleString();
+            return `
+              <tr>
+                <td style="color: var(--text-muted); font-size: 0.78rem;">${time}</td>
+                <td style="font-family: monospace; font-size: 0.8rem;">${b.filename}</td>
+                <td><span class="tag tag-blue">${b.sizeFormatted}</span></td>
+                <td><a href="/api/backups/download/${b.filename}" style="color: var(--cyan); text-decoration: none; font-weight: 600;">⬇️ Descargar</a></td>
+              </tr>
+            `;
+          }).join('');
+        }
+      } catch (_) {}
+    }
+
+    // Botones de acción HA
+    document.getElementById('btn-backup-now').addEventListener('click', async () => {
+      const btn = document.getElementById('btn-backup-now');
+      btn.disabled = true;
+      btn.textContent = '⏳ Respaldando...';
+      try {
+        const res = await fetch('/api/failover/backup-now', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          alert('¡Respaldo creado con éxito! ' + data.backup.filename + ' (' + data.backup.sizeFormatted + ')');
+          loadBackups();
+        } else {
+          alert('Error en respaldo: ' + (data.error || 'Verifica la IP y puerto'));
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '💾 Respaldar Ahora';
+      }
+    });
+
+    document.getElementById('btn-switch-node').addEventListener('click', async () => {
+      if (!confirm('¿Deseas conmutar el nodo activo (Failover / Failback)?\nEsto cambiará qué servidor recibe las escrituras.')) return;
+      const btn = document.getElementById('btn-switch-node');
+      btn.disabled = true;
+      btn.textContent = '⏳ Conmutando...';
+      try {
+        const res = await fetch('/api/failover/switch', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          alert('Conmutación completada. Nodo activo: ' + data.activeNode);
+        } else {
+          alert('Error al conmutar: ' + (data.error || 'Verifica los nodos'));
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🔄 Conmutar Nodo Activo';
+      }
+    });
+
+    function connectSSE() {
+      const sse = new EventSource('/api/stream');
+      sse.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          updateUI(data);
+        } catch (_) {}
+      };
+      sse.onerror = () => {
+        document.getElementById('conn-badge').className = 'badge-conn disconnected';
+        document.getElementById('conn-text').textContent = 'Reconectando servidor...';
+      };
+    }
+
+    async function fetchHistory() {
+      try {
+        const res = await fetch('/api/history');
+        if (res.ok) {
+          chartHistory = await res.json();
+          drawChart();
+        }
+      } catch (_) {}
+    }
+
+    connectSSE();
+    fetchHistory();
+    loadBackups();
+    setInterval(fetchHistory, 2500);
+    setInterval(loadBackups, 30000);
+  </script>
+</body>
+</html>
